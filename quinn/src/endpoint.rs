@@ -22,9 +22,8 @@ use tokio::sync::{mpsc, Notify};
 use udp::{RecvMeta, UdpState, BATCH_SIZE};
 
 use crate::{
-    mutex::Mutex,
-    connection::Connecting, poll_fn, work_limiter::WorkLimiter, ConnectionEvent, EndpointConfig,
-    EndpointEvent, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND, SEND_TIME_BOUND,
+    connection::Connecting, mutex::Mutex, poll_fn, work_limiter::WorkLimiter, ConnectionEvent,
+    EndpointConfig, EndpointEvent, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND, SEND_TIME_BOUND,
 };
 
 use ring::rand::*;
@@ -118,12 +117,7 @@ impl Endpoint {
     ) -> io::Result<(Self, Incoming)> {
         let runtime = Arc::new(runtime);
         let addr = socket.local_addr()?;
-        let rc = EndpointRef::new(
-            socket,
-            proto::Endpoint::new(Arc::new(config), server_config.map(Arc::new)),
-            addr.is_ipv6(),
-            runtime.clone(),
-        );
+        let rc = EndpointRef::new(socket, addr.is_ipv6(), runtime.clone());
         let driver = EndpointDriver(rc.clone());
         runtime.spawn(Box::pin(async {
             if let Err(e) = driver.await {
@@ -209,25 +203,17 @@ impl Endpoint {
 
         let local_addr = endpoint.socket.local_addr().unwrap();
 
-        let mut conn1 = quiche::connect(
-            Some(server_name),
-            &scid,
-            local_addr,
-            addr,
-            &mut config0,
-        )
-        .unwrap();
+        let mut conn =
+            quiche::connect(Some(server_name), &scid, local_addr, addr, &mut config0).unwrap();
         let ch = ConnectionHandle(endpoint.next_connection_id);
         endpoint.next_connection_id += 1;
-
-        let (ch, conn) = endpoint.inner.connect(config, addr, server_name)?;
 
         endpoint.connection_ids.insert(scid, ch);
 
         let udp_state = endpoint.udp_state.clone();
         Ok(endpoint
             .connections
-            .insert(ch, conn, conn1, false, udp_state, self.runtime.clone()))
+            .insert(ch, conn, false, udp_state, self.runtime.clone()))
     }
 
     /// Switch to a new UDP socket
@@ -252,6 +238,7 @@ impl Endpoint {
         Ok(())
     }
 
+    /*
     /// Replace the server configuration, affecting new incoming connections only
     ///
     /// Useful for e.g. refreshing TLS certificates without disrupting existing connections.
@@ -261,6 +248,7 @@ impl Endpoint {
             .inner
             .set_server_config(server_config.map(Arc::new))
     }
+    */
 
     /// Get the local `SocketAddr` the underlying socket is bound to
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -391,7 +379,6 @@ type ConnectionIdMap = HashMap<quiche::ConnectionId<'static>, ConnectionHandle>;
 pub(crate) struct EndpointInner {
     socket: Box<dyn AsyncUdpSocket>,
     udp_state: Arc<UdpState>,
-    inner: proto::Endpoint,
     incoming_dgram: VecDeque<proto::UdpDatagram>,
     outgoing: VecDeque<proto::Transmit>,
     incoming: VecDeque<Connecting>,
@@ -432,7 +419,11 @@ impl EndpointInner {
                 Poll::Ready(Ok(msgs)) => {
                     self.recv_limiter.record_work(msgs);
                     for (meta, buf) in metas.iter().zip(iovs.iter_mut()).take(msgs) {
-                        let hdr = quiche::Header::from_slice(&mut buf[0..meta.len], quiche::MAX_CONN_ID_LEN).unwrap();
+                        let hdr = quiche::Header::from_slice(
+                            &mut buf[0..meta.len],
+                            quiche::MAX_CONN_ID_LEN,
+                        )
+                        .unwrap();
 
                         let bind_addr = self.socket.local_addr().unwrap();
 
@@ -454,7 +445,9 @@ impl EndpointInner {
                                 continue;
                             }
                             let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-                            config.load_cert_chain_from_pem_file("src/cert.crt").unwrap();
+                            config
+                                .load_cert_chain_from_pem_file("src/cert.crt")
+                                .unwrap();
                             config.load_priv_key_from_pem_file("src/cert.key").unwrap();
                             config.set_application_protos(&[b"hq-29"]).unwrap();
                             config.set_max_idle_timeout(10000);
@@ -477,7 +470,7 @@ impl EndpointInner {
                             let ch = ConnectionHandle(self.next_connection_id);
                             self.next_connection_id += 1;
 
-                            let mut conn1 = quiche::accept(
+                            let mut conn = quiche::accept(
                                 &new_dcid,
                                 None,
                                 SocketAddr::new(meta.dst_ip.unwrap(), bind_addr.port()),
@@ -485,43 +478,27 @@ impl EndpointInner {
                                 &mut config,
                             )
                             .unwrap();
-                            
-                            let mut data: BytesMut = buf[0..meta.len].into();
-                            let buf = data.split_to(meta.stride.min(data.len()));
-                            if let Some((ch, DatagramEvent::NewConnection(conn))) = self.inner.handle(now, meta.addr, meta.dst_ip, meta.ecn, buf) {
-                                let conn = self.connections.insert(
-                                    ch,
-                                    conn,
-                                    conn1,
-                                    true,
-                                    self.udp_state.clone(),
-                                    self.runtime.clone(),
-                                );
-                                tracing::trace!("conn={:?}", conn);
-                                self.incoming.push_back(conn);
 
-                                self.connection_ids.insert(new_dcid, ch);
-                            } else {
-                                self.incoming_dgram.push_back(datagram);
-                                continue;
-                            }
+                            let conn = self.connections.insert(
+                                ch,
+                                conn,
+                                true,
+                                self.udp_state.clone(),
+                                self.runtime.clone(),
+                            );
+                            tracing::trace!("conn={:?}", conn);
+                            self.incoming.push_back(conn);
+
+                            self.connection_ids.insert(new_dcid, ch);
                             ch
                         };
 
-                        while let Some(d) = self.incoming_dgram.pop_front() {
-                            let _ = self
+                        let _ = self
                             .connections
                             .senders
                             .get_mut(&ch)
                             .unwrap()
-                            .send(ConnectionEvent::Datagram(d));
-                        }
-                        let _ = self
-                        .connections
-                        .senders
-                        .get_mut(&ch)
-                        .unwrap()
-                        .send(ConnectionEvent::Datagram(datagram));
+                            .send(ConnectionEvent::Datagram(datagram));
                     }
                 }
                 Poll::Pending => {
@@ -550,13 +527,6 @@ impl EndpointInner {
         self.send_limiter.start_cycle();
 
         let result = loop {
-            while self.outgoing.len() < BATCH_SIZE {
-                match self.inner.poll_transmit() {
-                    Some(x) => self.outgoing.push_back(x),
-                    None => break,
-                }
-            }
-
             if self.outgoing.is_empty() {
                 break Ok(false);
             }
@@ -614,7 +584,7 @@ impl EndpointInner {
                     }
                     Transmit(t) => {
                         self.outgoing.push_back(t);
-                    },
+                    }
                 },
                 Poll::Ready(None) => unreachable!("EndpointInner owns one sender"),
                 Poll::Pending => {
@@ -641,8 +611,7 @@ impl ConnectionSet {
     fn insert(
         &mut self,
         handle: ConnectionHandle,
-        conn: proto::Connection,
-        conn1: quiche::Connection,
+        conn: quiche::Connection,
         is_server: bool,
         udp_state: Arc<UdpState>,
         runtime: Arc<Box<dyn Runtime>>,
@@ -656,7 +625,15 @@ impl ConnectionSet {
             .unwrap();
         }
         self.senders.insert(handle, send);
-        Connecting::new(handle, conn, conn1, is_server, self.sender.clone(), recv, udp_state, runtime)
+        Connecting::new(
+            handle,
+            conn,
+            is_server,
+            self.sender.clone(),
+            recv,
+            udp_state,
+            runtime,
+        )
     }
 
     fn is_empty(&self) -> bool {
@@ -715,7 +692,7 @@ impl futures_core::Stream for Incoming {
 impl Drop for Incoming {
     fn drop(&mut self) {
         let endpoint = &mut *self.0.lock("Incoming::drop");
-        endpoint.inner.reject_new_connections();
+        //endpoint.inner.reject_new_connections();
         endpoint.incoming_reader = None;
     }
 }
@@ -726,22 +703,18 @@ pub(crate) struct EndpointRef(Arc<Mutex<EndpointInner>>);
 impl EndpointRef {
     pub(crate) fn new(
         socket: Box<dyn AsyncUdpSocket>,
-        inner: proto::Endpoint,
         ipv6: bool,
         runtime: Arc<Box<dyn Runtime>>,
     ) -> Self {
         let udp_state = Arc::new(UdpState::new());
         let recv_buf = vec![
             0;
-            inner.config().get_max_udp_payload_size().min(64 * 1024) as usize
-                * udp_state.gro_segments()
-                * BATCH_SIZE
+            1350 * udp_state.gro_segments() * BATCH_SIZE
         ];
         let (sender, events) = mpsc::unbounded_channel();
         Self(Arc::new(Mutex::new(EndpointInner {
             socket,
             udp_state,
-            inner,
             ipv6,
             events,
             incoming_dgram: VecDeque::new(),

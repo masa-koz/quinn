@@ -40,8 +40,7 @@ pub struct Connecting {
 impl Connecting {
     pub(crate) fn new(
         handle: ConnectionHandle,
-        conn: proto::Connection,
-        conn1: quiche::Connection,
+        conn: quiche::Connection,
         is_server: bool,
         endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
         conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
@@ -53,7 +52,6 @@ impl Connecting {
         let conn = ConnectionRef::new(
             handle,
             conn,
-            conn1,
             is_server,
             endpoint_events,
             conn_events,
@@ -72,6 +70,7 @@ impl Connecting {
         }
     }
 
+    /*
     /// Convert into a 0-RTT or 0.5-RTT connection at the cost of weakened security
     ///
     /// Opens up the connection for use before the handshake finishes, allowing the API user to
@@ -112,7 +111,9 @@ impl Connecting {
             Err(self)
         }
     }
+    */
 
+    /*
     /// Parameters negotiated during the handshake
     ///
     /// The dynamic type returned is determined by the configured
@@ -139,7 +140,9 @@ impl Connecting {
                     .expect("spurious handshake data ready notification")
             })
     }
+    */
 
+    /*
     /// The local IP address which was used when the peer established
     /// the connection
     ///
@@ -160,6 +163,7 @@ impl Connecting {
 
         inner.inner.local_ip()
     }
+    */
 }
 
 impl Future for Connecting {
@@ -182,6 +186,7 @@ impl Future for Connecting {
 }
 
 impl Connecting {
+    /*
     /// The peer's UDP address.
     ///
     /// Will panic if called after `poll` has returned `Ready`.
@@ -189,6 +194,7 @@ impl Connecting {
         let conn_ref: &ConnectionRef = self.conn.as_ref().expect("used after yielding Ready");
         conn_ref.lock("remote_address").inner.remote_address()
     }
+    */
 }
 
 /// Future that completes when a connection is fully established
@@ -293,7 +299,7 @@ impl Future for ConnectionDriver {
         conn.forward_endpoint_events();
         conn.forward_app_events();
 
-        if !conn.inner.is_drained() || !conn.inner1.is_closed(){
+        if !conn.inner.is_closed() {
             if keep_going {
                 // If the connection hasn't processed all tasks, schedule it again
                 cx.waker().wake_by_ref();
@@ -352,11 +358,11 @@ impl Connection {
             {
                 let mut conn = self.0.lock("open");
                 let mut id = if dir == Dir::Uni {
-                    let id = conn.next_uni_id >> 2;
+                    let id = conn.next_uni_id << 2;
                     conn.next_uni_id += 1;
                     id | 0x2
                 } else {
-                    let id = conn.next_bi_id >> 2;
+                    let id = conn.next_bi_id << 2;
                     conn.next_bi_id += 1;
                     id
                 };
@@ -364,7 +370,7 @@ impl Connection {
                     id |= 0x1;
                 }
 
-                if conn.inner1.stream_priority(id, 127, true).is_ok() {
+                if conn.inner.stream_priority(id, 127, true).is_ok() {
                     let is_0rtt = false;
                     return Ok((StreamId(id), is_0rtt));
                 }
@@ -407,6 +413,7 @@ impl Connection {
         conn.close(error_code, Bytes::copy_from_slice(reason));
     }
 
+    /*
     /// Transmit `data` as an unreliable, unordered application datagram
     ///
     /// Application datagrams are a low-level primitive. They may be lost or delivered out of order,
@@ -430,7 +437,9 @@ impl Connection {
             }),
         }
     }
+    */
 
+    /*
     /// Compute the maximum size of datagrams that may be passed to [`send_datagram()`].
     ///
     /// Returns `None` if datagrams are unsupported by the peer or disabled locally.
@@ -449,7 +458,9 @@ impl Connection {
             .datagrams()
             .max_size()
     }
+    */
 
+    /*
     /// The peer's UDP address
     ///
     /// If `ServerConfig::migration` is `true`, clients may change addresses at will, e.g. when
@@ -457,7 +468,9 @@ impl Connection {
     pub fn remote_address(&self) -> SocketAddr {
         self.0.lock("remote_address").inner.remote_address()
     }
+    */
 
+    /*
     /// The local IP address which was used when the peer established
     /// the connection
     ///
@@ -475,17 +488,23 @@ impl Connection {
     pub fn local_ip(&self) -> Option<IpAddr> {
         self.0.lock("local_ip").inner.local_ip()
     }
+    */
 
+    /*
     /// Current best estimate of this connection's latency (round-trip-time)
     pub fn rtt(&self) -> Duration {
         self.0.lock("rtt").inner.rtt()
     }
+    */
 
+    /*
     /// Returns connection statistics
     pub fn stats(&self) -> ConnectionStats {
         self.0.lock("stats").inner.stats()
     }
+    */
 
+    /*
     /// Current state of the congestion control algorithm, for debugging purposes
     pub fn congestion_state(&self) -> Box<dyn Controller> {
         self.0
@@ -494,7 +513,9 @@ impl Connection {
             .congestion_state()
             .clone_box()
     }
+    */
 
+    /*
     /// Parameters negotiated during the handshake
     ///
     /// Guaranteed to return `Some` on fully established connections or after
@@ -509,7 +530,9 @@ impl Connection {
             .crypto_session()
             .handshake_data()
     }
+    */
 
+    /*
     /// Cryptographic identity of the peer
     ///
     /// The dynamic type returned is determined by the configured
@@ -522,6 +545,7 @@ impl Connection {
             .crypto_session()
             .peer_identity()
     }
+    */
 
     /// A stable identifier for this connection
     ///
@@ -531,12 +555,15 @@ impl Connection {
         self.0.stable_id()
     }
 
+    /*
     // Update traffic keys spontaneously for testing purposes.
     #[doc(hidden)]
     pub fn force_key_update(&self) {
         self.0.lock("force_key_update").inner.initiate_key_update()
     }
+    */
 
+    /*
     /// Derive keying material from this connection's TLS session secrets.
     ///
     /// When both peers call this method with the same `label` and `context`
@@ -557,7 +584,9 @@ impl Connection {
             .crypto_session()
             .export_keying_material(output, label, context)
     }
+    */
 
+    /*
     /// Modify the number of remotely initiated unidirectional streams that may be concurrently open
     ///
     /// No streams may be opened by the peer unless fewer than `count` are already open. Large
@@ -568,14 +597,18 @@ impl Connection {
         // May need to send MAX_STREAMS to make progress
         conn.wake();
     }
+    */
 
+    /*
     /// See [`proto::TransportConfig::receive_window()`]
     pub fn set_receive_window(&self, receive_window: VarInt) {
         let mut conn = self.0.lock("set_receive_window");
         conn.inner.set_receive_window(receive_window);
         conn.wake();
     }
+    */
 
+    /*
     /// Modify the number of remotely initiated bidirectional streams that may be concurrently open
     ///
     /// No streams may be opened by the peer unless fewer than `count` are already open. Large
@@ -586,6 +619,7 @@ impl Connection {
         // May need to send MAX_STREAMS to make progress
         conn.wake();
     }
+    */
 }
 
 impl Clone for Connection {
@@ -615,10 +649,19 @@ impl IncomingUniStreams {
 
     fn poll(&mut self, cx: &mut Context) -> Poll<Option<Result<RecvStream, ConnectionError>>> {
         let mut conn = self.0.lock("IncomingUniStreams::poll");
-        if let Some(x) = conn.inner.streams().accept(Dir::Uni) {
+        if let Some(id) = conn
+            .inner
+            .readable()
+            .filter(|id| (*id & 0x2) == 0x02 && (conn.is_server && (*id & 0x1) == 0))
+            .next()
+        {
             conn.wake(); // To send additional stream ID credit
             mem::drop(conn); // Release the lock so clone can take it
-            Poll::Ready(Some(Ok(RecvStream::new(self.0.clone(), x, false))))
+            Poll::Ready(Some(Ok(RecvStream::new(
+                self.0.clone(),
+                StreamId(id),
+                false,
+            ))))
         } else if let Some(ConnectionError::LocallyClosed) = conn.error {
             Poll::Ready(None)
         } else if let Some(ref e) = conn.error {
@@ -655,20 +698,28 @@ impl IncomingBiStreams {
         &mut self,
         cx: &mut Context,
     ) -> Poll<Option<Result<(SendStream, RecvStream), ConnectionError>>> {
+        tracing::trace!("poll");
         let mut conn = self.0.lock("IncomingBiStreams::poll");
-        if let Some(x) = conn.inner.streams().accept(Dir::Bi) {
-            let is_0rtt = conn.inner.is_handshaking();
+        tracing::trace!("readable={:?}", conn.inner.readable().collect::<Vec<u64>>());
+        if let Some(id) = conn
+            .inner
+            .readable()
+            .filter(|id| (*id & 0x2) == 0 && (conn.is_server && (*id & 0x1) != 0x1))
+            .next()
+        {
+            let is_0rtt = false;
             conn.wake(); // To send additional stream ID credit
             mem::drop(conn); // Release the lock so clone can take it
             Poll::Ready(Some(Ok((
-                SendStream::new(self.0.clone(), x, is_0rtt),
-                RecvStream::new(self.0.clone(), x, is_0rtt),
+                SendStream::new(self.0.clone(), StreamId(id), is_0rtt),
+                RecvStream::new(self.0.clone(), StreamId(id), is_0rtt),
             ))))
         } else if let Some(ConnectionError::LocallyClosed) = conn.error {
             Poll::Ready(None)
         } else if let Some(ref e) = conn.error {
             Poll::Ready(Some(Err(e.clone())))
         } else {
+            tracing::trace!("pending");
             conn.incoming_bi_streams_reader = Some(cx.waker().clone());
             Poll::Pending
         }
@@ -690,13 +741,13 @@ pub struct Datagrams(ConnectionRef);
 
 impl Datagrams {
     /// Fetch the next application datagram from the peer
-    pub async fn next(&mut self) -> Option<Result<Bytes, ConnectionError>> {
+    pub async fn next(&mut self) -> Option<Result<Vec<u8>, ConnectionError>> {
         poll_fn(move |cx| self.poll(cx)).await
     }
 
-    fn poll(&mut self, cx: &mut Context) -> Poll<Option<Result<Bytes, ConnectionError>>> {
-        let mut conn = self.0.lock("Datagrams::poll_next");
-        if let Some(x) = conn.inner.datagrams().recv() {
+    fn poll(&mut self, cx: &mut Context) -> Poll<Option<Result<Vec<u8>, ConnectionError>>> {
+        let mut conn = self.0.lock("Datagrams::poll");
+        if let Ok(x) = conn.inner.dgram_recv_vec() {
             Poll::Ready(Some(Ok(x)))
         } else if let Some(ConnectionError::LocallyClosed) = conn.error {
             Poll::Ready(None)
@@ -725,8 +776,7 @@ impl ConnectionRef {
     #[allow(clippy::too_many_arguments)]
     fn new(
         handle: ConnectionHandle,
-        conn: proto::Connection,
-        conn1: quiche::Connection,
+        conn: quiche::Connection,
         is_server: bool,
         endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
         conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
@@ -737,7 +787,6 @@ impl ConnectionRef {
     ) -> Self {
         Self(Arc::new(Mutex::new(ConnectionInner {
             inner: conn,
-            inner1: conn1,
             driver: None,
             handle,
             is_server,
@@ -783,7 +832,7 @@ impl Drop for ConnectionRef {
         let conn = &mut *self.lock("drop");
         if let Some(x) = conn.ref_count.checked_sub(1) {
             conn.ref_count = x;
-            if x == 0 && !conn.inner1.is_closed() {
+            if x == 0 && !conn.inner.is_closed() {
                 // If the driver is alive, it's just it and us, so we'd better shut it down. If it's
                 // not, we can't do any harm. If there were any streams being opened, then either
                 // the connection will be closed for an unrelated reason or a fresh reference will
@@ -802,8 +851,7 @@ impl std::ops::Deref for ConnectionRef {
 }
 
 pub struct ConnectionInner {
-    pub(crate) inner: proto::Connection,
-    pub(crate) inner1: quiche::Connection,
+    pub(crate) inner: quiche::Connection,
     driver: Option<Waker>,
     handle: ConnectionHandle,
     is_server: bool,
@@ -842,7 +890,7 @@ impl ConnectionInner {
 
         loop {
             let mut buf = vec![0; 4096];
-            let (write, send_info) = match self.inner1.send(&mut buf) {
+            let (write, send_info) = match self.inner.send(&mut buf) {
                 Ok(v) => v,
                 Err(quiche::Error::Done) => {
                     break;
@@ -901,16 +949,11 @@ impl ConnectionInner {
     }
 
     fn forward_endpoint_events(&mut self) {
-        while let Some(event) = self.inner.poll_endpoint_events() {
-            // If the endpoint driver is gone, noop.
-            let _ = self
-                .endpoint_events
-                .send((self.handle, EndpointEvent::Proto(event)));
-        }
-        if self.inner1.is_closed() {
-            let _ = self
-                .endpoint_events
-                .send((self.handle, EndpointEvent::Proto(proto::EndpointEvent::drained())));
+        if self.inner.is_closed() {
+            let _ = self.endpoint_events.send((
+                self.handle,
+                EndpointEvent::Proto(proto::EndpointEvent::drained()),
+            ));
         }
     }
 
@@ -919,17 +962,20 @@ impl ConnectionInner {
         loop {
             match self.conn_events.poll_recv(cx) {
                 Poll::Ready(Some(ConnectionEvent::Ping)) => {
-                    self.inner.ping();
+                    //self.inner.ping();
                 }
                 Poll::Ready(Some(ConnectionEvent::Proto(event))) => {
-                    self.inner.handle_event(event);
+                    //self.inner.handle_event(event);
                 }
                 Poll::Ready(Some(ConnectionEvent::Close { reason, error_code })) => {
                     self.close(error_code, reason);
                 }
                 Poll::Ready(Some(ConnectionEvent::Datagram(mut datagram))) => {
-                    let recvinfo = quiche::RecvInfo { from: datagram.source, to: datagram.destination };
-                    match self.inner1.recv(&mut datagram.contents[..], recvinfo) {
+                    let recvinfo = quiche::RecvInfo {
+                        from: datagram.source,
+                        to: datagram.destination,
+                    };
+                    match self.inner.recv(&mut datagram.contents[..], recvinfo) {
                         Ok(len) => {
                             tracing::trace!("recv: len={}", len);
                         }
@@ -937,7 +983,6 @@ impl ConnectionInner {
                             tracing::error!("recv: error={:?}", e);
                         }
                     }
-                    
                 }
                 Poll::Ready(None) => {
                     return Err(ConnectionError::TransportError(proto::TransportError {
@@ -954,40 +999,54 @@ impl ConnectionInner {
     }
 
     fn forward_app_events(&mut self) {
-        if !self.connected && self.inner1.is_established() {
+        if !self.connected && self.inner.is_established() {
             self.connected = true;
             if let Some(x) = self.on_connected.take() {
                 let _ = x.send(false);
             }
         }
 
-        if self.inner1.is_timed_out() {
+        if self.inner.is_timed_out() {
             self.terminate(ConnectionError::TimedOut);
         }
 
-        if self.inner1.is_closed() {
-            if let Some(error) = self.inner1.local_error() {
+        if self.inner.is_closed() {
+            if let Some(error) = self.inner.local_error() {
                 tracing::trace!("error={:?}", error);
             }
             self.terminate(ConnectionError::LocallyClosed);
         }
 
-        if (!self.blocked_readers.is_empty() && self.inner1.is_readable()) {
-            for id in self.inner1.readable() {
+        if self.incoming_bi_streams_reader.is_some() {
+            tracing::trace!("incoming_bi_streams_reader");
+            if self.inner
+                .readable()
+                .filter(|id| (*id & 0x2) == 0 && (self.is_server && (*id & 0x1) == 0))
+                .next()
+                .is_some()
+            {
+                if let Some(x) = self.incoming_bi_streams_reader.take() {
+                    x.wake();
+                }
+            }
+        }
+        if !self.blocked_readers.is_empty() && self.inner.is_readable() {
+            for id in self.inner.readable() {
                 if let Some(reader) = self.blocked_readers.remove(&StreamId(id)) {
                     reader.wake();
                 }
             }
         }
 
-        if (!self.blocked_writers.is_empty() && self.inner1.writable().next().is_some()) {
-            for id in self.inner1.writable() {
+        if !self.blocked_writers.is_empty() && self.inner.writable().next().is_some() {
+            for id in self.inner.writable() {
                 if let Some(writer) = self.blocked_writers.remove(&StreamId(id)) {
                     writer.wake();
                 }
             }
         }
 
+        /*
         while let Some(event) = self.inner.poll() {
             use proto::Event::*;
             match event {
@@ -1053,6 +1112,7 @@ impl ConnectionInner {
                 }
             }
         }
+        */
     }
 
     fn drive_timer(&mut self, cx: &mut Context) -> bool {
@@ -1107,11 +1167,11 @@ impl ConnectionInner {
         */
         if let Some(sleep) = &self.sleep {
             if sleep.as_ref().is_elapsed() {
-                self.inner1.on_timeout();                
+                self.inner.on_timeout();
             }
         }
 
-        let timeout = match self.inner1.timeout() {
+        let timeout = match self.inner.timeout() {
             Some(v) => v,
             None => {
                 self.sleep = None;
@@ -1123,7 +1183,7 @@ impl ConnectionInner {
             return false;
         }
         self.sleep = None;
-        self.inner1.on_timeout();
+        self.inner.on_timeout();
         true
     }
 
@@ -1169,7 +1229,11 @@ impl ConnectionInner {
     }
 
     fn close(&mut self, error_code: VarInt, reason: Bytes) {
-        if self.inner1.close(true, error_code.into(), &reason[..]).is_ok() {
+        if self
+            .inner
+            .close(true, error_code.into(), &reason[..])
+            .is_ok()
+        {
             self.terminate(ConnectionError::LocallyClosed);
             self.wake();
         }
@@ -1180,6 +1244,7 @@ impl ConnectionInner {
         self.close(0u32.into(), Bytes::new());
     }
 
+    /*
     pub(crate) fn check_0rtt(&self) -> Result<(), ()> {
         if self.inner.is_handshaking()
             || self.inner.accepted_0rtt()
@@ -1190,11 +1255,12 @@ impl ConnectionInner {
             Err(())
         }
     }
+    */
 }
 
 impl Drop for ConnectionInner {
     fn drop(&mut self) {
-        if !self.inner.is_drained() {
+        if !self.inner.is_closed() {
             // Ensure the endpoint can tidy up
             let _ = self.endpoint_events.send((
                 self.handle,
@@ -1206,9 +1272,7 @@ impl Drop for ConnectionInner {
 
 impl fmt::Debug for ConnectionInner {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.debug_struct("ConnectionInner")
-            .field("inner", &self.inner)
-            .finish()
+        f.debug_struct("ConnectionInner").finish()
     }
 }
 
@@ -1242,7 +1306,7 @@ const MAX_TRANSMIT_DATAGRAMS: usize = 20;
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 #[error("unknown stream")]
 pub struct UnknownStream {
-    _private: (),
+    pub _private: (),
 }
 
 impl From<proto::UnknownStream> for UnknownStream {

@@ -15,6 +15,8 @@ use clap::Parser;
 use tracing::{error, info, info_span};
 use tracing_futures::Instrument as _;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
 mod common;
 
 #[derive(Parser, Debug)]
@@ -166,6 +168,7 @@ async fn handle_connection(root: Arc<Path>, conn: quinn::Connecting) -> Result<(
         mut bi_streams,
         ..
     } = conn.await?;
+    /*
     let span = info_span!(
         "connection",
         remote = %connection.remote_address(),
@@ -176,6 +179,7 @@ async fn handle_connection(root: Arc<Path>, conn: quinn::Connecting) -> Result<(
             .protocol
             .map_or_else(|| "<none>".into(), |x| String::from_utf8_lossy(&x).into_owned())
     );
+    */
     async {
         info!("established");
 
@@ -203,17 +207,18 @@ async fn handle_connection(root: Arc<Path>, conn: quinn::Connecting) -> Result<(
         }
         Ok(())
     }
-    .instrument(span)
+    //.instrument(span)
     .await?;
     Ok(())
 }
 
 async fn handle_request(
     root: Arc<Path>,
-    (mut send, recv): (quinn::SendStream, quinn::RecvStream),
+    (mut send, mut recv): (quinn::SendStream, quinn::RecvStream),
 ) -> Result<()> {
-    let req = recv
-        .read_to_end(64 * 1024)
+    let mut req = Vec::new();
+    let _ = recv
+        .read_to_end(&mut req)
         .await
         .map_err(|e| anyhow!("failed reading request: {}", e))?;
     let mut escaped = String::new();

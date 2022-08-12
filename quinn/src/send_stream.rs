@@ -40,6 +40,7 @@ impl SendStream {
         }
     }
 
+    /*
     /// Write bytes to the stream
     ///
     /// Yields the number of bytes written on success. Congestion and flow control may cause this to
@@ -47,12 +48,16 @@ impl SendStream {
     pub async fn write(&mut self, buf: &[u8]) -> Result<usize, WriteError> {
         Write { stream: self, buf }.await
     }
+    */
 
+    /*
     /// Convenience method to write an entire buffer to the stream
     pub async fn write_all(&mut self, buf: &[u8]) -> Result<(), WriteError> {
         WriteAll { stream: self, buf }.await
     }
+    */
 
+    /*
     /// Write chunks to the stream
     ///
     /// Yields the number of bytes and chunks written on success.
@@ -61,7 +66,9 @@ impl SendStream {
     pub async fn write_chunks(&mut self, bufs: &mut [Bytes]) -> Result<Written, WriteError> {
         WriteChunks { stream: self, bufs }.await
     }
+    */
 
+    /*
     /// Convenience method to write a single chunk in its entirety to the stream
     pub async fn write_chunk(&mut self, buf: Bytes) -> Result<(), WriteError> {
         WriteChunk {
@@ -70,7 +77,9 @@ impl SendStream {
         }
         .await
     }
+    */
 
+    /*
     /// Convenience method to write an entire list of chunks to the stream
     pub async fn write_all_chunks(&mut self, bufs: &mut [Bytes]) -> Result<(), WriteError> {
         WriteAllChunks {
@@ -80,19 +89,22 @@ impl SendStream {
         }
         .await
     }
+    */
 
     fn execute_poll1(&mut self, cx: &mut Context, data: &[u8]) -> Poll<Result<usize, WriteError>>
     {
         let mut conn = self.conn.lock("SendStream::poll_write");
+        /*
         if self.is_0rtt {
             conn.check_0rtt()
                 .map_err(|()| WriteError::ZeroRttRejected)?;
         }
+        */
         if let Some(ref x) = conn.error {
             return Poll::Ready(Err(WriteError::ConnectionLost(x.clone())));
         }
 
-        let result = match conn.inner1.stream_send(self.stream.0, data, false) {
+        let result = match conn.inner.stream_send(self.stream.0, data, false) {
             Ok(result) => result,
             Err(quiche::Error::Done) => {
                 conn.blocked_writers.insert(self.stream, cx.waker().clone());
@@ -111,6 +123,7 @@ impl SendStream {
         Poll::Ready(Ok(result))
     }
 
+    /*
     fn execute_poll<F, R>(&mut self, cx: &mut Context, write_fn: F) -> Poll<Result<R, WriteError>>
     where
         F: FnOnce(&mut proto::SendStream) -> Result<R, proto::WriteError>,
@@ -142,6 +155,7 @@ impl SendStream {
         conn.wake();
         Poll::Ready(Ok(result))
     }
+    */
 
     /// Shut down the send stream gracefully.
     ///
@@ -149,8 +163,8 @@ impl SendStream {
     /// acknowledged all sent data, retransmitting data as needed.
     pub async fn finish(&mut self) -> Result<(), WriteError> {
         let mut conn = self.conn.lock("finish");
-        match conn.inner1.stream_send(self.stream.0, &Vec::new(), true) {
-            Ok(result) => return(Ok(())),
+        match conn.inner.stream_send(self.stream.0, &Vec::new(), true) {
+            Ok(result) => return Ok(()),
             Err(quiche::Error::InvalidStreamState(_)) => return Err(WriteError::UnknownStream),
             Err(e) => {
                 tracing::error!("stream_send: error={:?}", e);
@@ -159,6 +173,7 @@ impl SendStream {
         }
     }
 
+    /*
     #[doc(hidden)]
     pub fn poll_finish(&mut self, cx: &mut Context) -> Poll<Result<(), WriteError>> {
         let mut conn = self.conn.lock("poll_finish");
@@ -198,7 +213,9 @@ impl SendStream {
             }
         }
     }
+    */
 
+    /*
     /// Close the send stream immediately.
     ///
     /// No new data can be written after calling this method. Locally buffered data is dropped, and
@@ -213,7 +230,9 @@ impl SendStream {
         conn.wake();
         Ok(())
     }
+    */
 
+    /*
     /// Set the priority of the send stream
     ///
     /// Every send stream has an initial priority of 0. Locally buffered data from streams with
@@ -226,18 +245,24 @@ impl SendStream {
         conn.inner.send_stream(self.stream).set_priority(priority)?;
         Ok(())
     }
+    */
 
+    /*
     /// Get the priority of the send stream
     pub fn priority(&self) -> Result<i32, UnknownStream> {
         let mut conn = self.conn.lock("SendStream::priority");
         Ok(conn.inner.send_stream(self.stream).priority()?)
     }
+    */
 
+    /*
     /// Completes if/when the peer stops the stream, yielding the error code
     pub async fn stopped(&mut self) -> Result<VarInt, StoppedError> {
         Stopped { stream: self }.await
     }
+    */
 
+    /*
     #[doc(hidden)]
     pub fn poll_stopped(&mut self, cx: &mut Context) -> Poll<Result<VarInt, StoppedError>> {
         let mut conn = self.conn.lock("SendStream::poll_stopped");
@@ -256,6 +281,7 @@ impl SendStream {
             }
         }
     }
+    */
 
     /// Get the identity of this stream
     pub fn id(&self) -> StreamId {
@@ -293,12 +319,14 @@ impl tokio::io::AsyncWrite for SendStream {
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        self.get_mut().poll_finish(cx).map_err(Into::into)
+        //self.get_mut().poll_finish(cx).map_err(Into::into)
+        Poll::Ready(Ok(()))
     }
 }
 
 impl Drop for SendStream {
     fn drop(&mut self) {
+        /*
         let mut conn = self.conn.lock("SendStream::drop");
         if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
@@ -315,9 +343,11 @@ impl Drop for SendStream {
                 Err(FinishError::UnknownStream) => {}
             }
         }
+        */
     }
 }
 
+/*
 /// Future produced by `SendStream::finish`
 #[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"]
 struct Finish<'a> {
@@ -453,6 +483,7 @@ impl<'a> Future for WriteAllChunks<'a> {
         }
     }
 }
+*/
 
 /// Errors that arise from writing to a stream
 #[derive(Debug, Error, Clone, PartialEq, Eq)]

@@ -119,50 +119,42 @@ async fn run(options: Opt) -> Result<()> {
         let quinn::NewConnection {
             connection: conn, ..
         } = new_conn;
-        let (mut send, mut recv) = conn
-            .open_bi()
-            .await
-            .map_err(|e| anyhow!("failed to open stream: {}", e))?;
-        if rebind {
-            let socket = std::net::UdpSocket::bind("[::]:0").unwrap();
-            let addr = socket.local_addr().unwrap();
-            eprintln!("rebinding to {}", addr);
-            endpoint.rebind(socket).expect("rebind failed");
+
+        {
+            let (mut send, mut recv) = conn
+                .open_bi()
+                .await
+                .map_err(|e| anyhow!("failed to open stream: {}", e))?;
+            if rebind {
+                let socket = std::net::UdpSocket::bind("[::]:0").unwrap();
+                let addr = socket.local_addr().unwrap();
+                eprintln!("rebinding to {}", addr);
+                endpoint.rebind(socket).expect("rebind failed");
+            }
+
+            AsyncWriteExt::write_all(&mut send, request.as_bytes())
+                .await
+                .map_err(|e| anyhow!("failed to send request: {}", e))?;
+            send.finish()
+                .await
+                .map_err(|e| anyhow!("failed to shutdown stream: {}", e))?;
+            let response_start = Instant::now();
+            eprintln!("request sent at {:?}", response_start - start);
+
+            let mut resp = Vec::new();
+            let len = AsyncReadExt::read_to_end(&mut recv, &mut resp)
+                .await
+                .map_err(|e| anyhow!("failed to read response: {}", e))?;
+            let duration = response_start.elapsed();
+            eprintln!(
+                "response received in {:?} - {} KiB/s",
+                duration,
+                resp.len() as f32 / (duration_secs(&duration) * 1024.0)
+            );
+            io::stdout().write_all(&resp).unwrap();
+            io::stdout().flush().unwrap();
+            conn.close(0u32.into(), b"done");
         }
-
-        /*
-        send.write_all(request.as_bytes())
-            .await
-            .map_err(|e| anyhow!("failed to send request: {}", e))?;
-         */
-        AsyncWriteExt::write_all(&mut send, request.as_bytes())
-            .await
-            .map_err(|e| anyhow!("failed to send request: {}", e))?;
-        send.finish()
-            .await
-            .map_err(|e| anyhow!("failed to shutdown stream: {}", e))?;
-        let response_start = Instant::now();
-        eprintln!("request sent at {:?}", response_start - start);
-
-        let mut resp = Vec::new();
-        let len = AsyncReadExt::read_to_end(&mut recv, &mut resp)
-            .await
-            .map_err(|e| anyhow!("failed to read response: {}", e))?;
-        /*
-        let resp = recv
-            .read_to_end(usize::max_value())
-            .await
-            .map_err(|e| anyhow!("failed to read response: {}", e))?;
-        */
-        let duration = response_start.elapsed();
-        eprintln!(
-            "response received in {:?} - {} KiB/s",
-            duration,
-            resp.len() as f32 / (duration_secs(&duration) * 1024.0)
-        );
-        io::stdout().write_all(&resp).unwrap();
-        io::stdout().flush().unwrap();
-        conn.close(0u32.into(), b"done");
     }
 
     // Give the server a fair chance to receive the close packet

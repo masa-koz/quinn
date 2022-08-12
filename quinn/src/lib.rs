@@ -74,7 +74,7 @@ pub use crate::connection::{
     SendDatagramError, UnknownStream, ZeroRttAccepted,
 };
 pub use crate::endpoint::{Endpoint, Incoming};
-pub use crate::recv_stream::{ReadError, ReadExactError, ReadToEndError, RecvStream};
+pub use crate::recv_stream::{ReadError, RecvStream};
 #[cfg(feature = "runtime-async-std")]
 pub use crate::runtime::AsyncStdRuntime;
 #[cfg(feature = "runtime-tokio")]

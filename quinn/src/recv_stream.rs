@@ -43,6 +43,7 @@ impl RecvStream {
         }
     }
 
+    /*
     /// Read data contiguously from the stream.
     ///
     /// Yields the number of bytes read into `buf` on success, or `None` if the stream was finished.
@@ -53,7 +54,9 @@ impl RecvStream {
         }
         .await
     }
+    */
 
+    /*
     /// Read an exact number of bytes contiguously from the stream.
     ///
     /// See [`read()`] for details.
@@ -66,6 +69,7 @@ impl RecvStream {
         }
         .await
     }
+    */
 
     fn poll_read(
         &mut self,
@@ -79,7 +83,7 @@ impl RecvStream {
         let b = buf.initialize_unfilled();
 
         let mut conn = self.conn.lock("RecvStream::poll_read");
-        match conn.inner1.stream_recv(self.stream.0, b) {
+        match conn.inner.stream_recv(self.stream.0, b) {
             Ok((n, fin)) => {
                 buf.advance(n);
                 if fin {
@@ -98,10 +102,10 @@ impl RecvStream {
                 tracing::error!("stream_recv: error={:?}", e);
                 return Poll::Ready(Err(ReadError::UnknownStream));
             }
-
         }
     }
 
+    /*
     /// Read the next segment of data
     ///
     /// Yields `None` if the stream was finished. Otherwise, yields a segment of data and its
@@ -125,7 +129,9 @@ impl RecvStream {
         }
         .await
     }
+    */
 
+    /*
     /// Foundation of [`Self::read_chunk`]
     fn poll_read_chunk(
         &mut self,
@@ -138,7 +144,9 @@ impl RecvStream {
             res => (None, res.err()).into(),
         })
     }
+    */
 
+    /*
     /// Read the next segments of data
     ///
     /// Fills `bufs` with the segments of data beginning immediately after the
@@ -150,7 +158,9 @@ impl RecvStream {
     pub async fn read_chunks(&mut self, bufs: &mut [Bytes]) -> Result<Option<usize>, ReadError> {
         ReadChunks { stream: self, bufs }.await
     }
+    */
 
+    /*
     /// Foundation of [`Self::read_chunks`]
     fn poll_read_chunks(
         &mut self,
@@ -179,7 +189,9 @@ impl RecvStream {
             }
         })
     }
+    */
 
+    /*
     /// Convenience method to read all remaining data into a buffer
     ///
     /// The returned future fails with [`ReadToEndError::TooLong`] if it's longer than `size_limit`
@@ -200,6 +212,7 @@ impl RecvStream {
         }
         .await
     }
+    */
 
     /// Stop accepting data
     ///
@@ -207,13 +220,22 @@ impl RecvStream {
     /// attempts to operate on a stream will yield `UnknownStream` errors.
     pub fn stop(&mut self, error_code: VarInt) -> Result<(), UnknownStream> {
         let mut conn = self.conn.lock("RecvStream::stop");
+        /*
         if self.is_0rtt && conn.check_0rtt().is_err() {
             return Ok(());
         }
-        conn.inner.recv_stream(self.stream).stop(error_code)?;
-        conn.wake();
-        self.all_data_read = true;
-        Ok(())
+        */
+        if conn
+            .inner
+            .stream_shutdown(self.stream.0, quiche::Shutdown::Read, error_code.into())
+            .is_ok()
+        {
+            conn.wake();
+            self.all_data_read = true;
+            Ok(())
+        } else {
+            Err(UnknownStream { _private: () })
+        }
     }
 
     /// Check if this stream has been opened during 0-RTT.
@@ -229,6 +251,7 @@ impl RecvStream {
         self.stream
     }
 
+    /*
     /// Handle common logic related to reading out of a receive stream
     ///
     /// This takes an `FnMut` closure that takes care of the actual reading process, matching
@@ -297,6 +320,7 @@ impl RecvStream {
             },
         }
     }
+    */
 }
 
 enum ReadStatus<T> {
@@ -314,6 +338,7 @@ impl<T> From<(Option<T>, Option<proto::ReadError>)> for ReadStatus<T> {
     }
 }
 
+/*
 /// Future produced by [`RecvStream::read_to_end()`].
 ///
 /// [`RecvStream::read_to_end()`]: crate::RecvStream::read_to_end
@@ -368,6 +393,7 @@ pub enum ReadToEndError {
     #[error("stream too long")]
     TooLong,
 }
+*/
 
 #[cfg(feature = "futures-io")]
 impl futures_io::AsyncRead for RecvStream {
@@ -396,12 +422,14 @@ impl tokio::io::AsyncRead for RecvStream {
 impl Drop for RecvStream {
     fn drop(&mut self) {
         let mut conn = self.conn.lock("RecvStream::drop");
+        /*
         if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
         }
+        */
         if !self.all_data_read {
             // Ignore UnknownStream errors
-            let _ = conn.inner.recv_stream(self.stream).stop(0u32.into());
+            let _ = conn.inner.stream_shutdown(self.stream.0, quiche::Shutdown::Read, 0);
             conn.wake();
         }
     }
@@ -458,6 +486,7 @@ impl From<ReadError> for io::Error {
     }
 }
 
+/*
 /// Future produced by [`RecvStream::read()`].
 ///
 /// [`RecvStream::read()`]: crate::RecvStream::read
@@ -551,3 +580,4 @@ impl<'a> Future for ReadChunks<'a> {
         this.stream.poll_read_chunks(cx, this.bufs)
     }
 }
+*/
