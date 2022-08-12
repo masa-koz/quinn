@@ -41,6 +41,8 @@ impl Connecting {
     pub(crate) fn new(
         handle: ConnectionHandle,
         conn: proto::Connection,
+        conn1: quiche::Connection,
+        is_server: bool,
         endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
         conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
         udp_state: Arc<UdpState>,
@@ -51,6 +53,8 @@ impl Connecting {
         let conn = ConnectionRef::new(
             handle,
             conn,
+            conn1,
+            is_server,
             endpoint_events,
             conn_events,
             on_handshake_data_send,
@@ -289,7 +293,7 @@ impl Future for ConnectionDriver {
         conn.forward_endpoint_events();
         conn.forward_app_events();
 
-        if !conn.inner.is_drained() {
+        if !conn.inner.is_drained() || !conn.inner1.is_closed(){
             if keep_going {
                 // If the connection hasn't processed all tasks, schedule it again
                 cx.waker().wake_by_ref();
@@ -347,13 +351,30 @@ impl Connection {
             let opening;
             {
                 let mut conn = self.0.lock("open");
-                if let Some(ref e) = conn.error {
-                    return Err(e.clone());
+                let mut id = if dir == Dir::Uni {
+                    let id = conn.next_uni_id >> 2;
+                    conn.next_uni_id += 1;
+                    id | 0x2
+                } else {
+                    let id = conn.next_bi_id >> 2;
+                    conn.next_bi_id += 1;
+                    id
+                };
+                if conn.is_server {
+                    id |= 0x1;
                 }
+
+                if conn.inner1.stream_priority(id, 127, true).is_ok() {
+                    let is_0rtt = false;
+                    return Ok((StreamId(id), is_0rtt));
+                }
+
+                /*
                 if let Some(id) = conn.inner.streams().open(dir) {
                     let is_0rtt = conn.inner.side().is_client() && conn.inner.is_handshaking();
                     return Ok((id, is_0rtt));
                 }
+                */
                 // Clone the `Arc<Notify>` so we can wait on the underlying `Notify` without holding
                 // the lock. Store it in the outer scope to ensure it outlives the lock guard.
                 opening = conn.stream_opening[dir as usize].clone();
@@ -705,6 +726,8 @@ impl ConnectionRef {
     fn new(
         handle: ConnectionHandle,
         conn: proto::Connection,
+        conn1: quiche::Connection,
+        is_server: bool,
         endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
         conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
         on_handshake_data: oneshot::Sender<()>,
@@ -714,17 +737,22 @@ impl ConnectionRef {
     ) -> Self {
         Self(Arc::new(Mutex::new(ConnectionInner {
             inner: conn,
+            inner1: conn1,
             driver: None,
             handle,
+            is_server,
             on_handshake_data: Some(on_handshake_data),
             on_connected: Some(on_connected),
             connected: false,
+            sleep: None,
             timer: None,
             timer_deadline: None,
             conn_events,
             endpoint_events,
             blocked_writers: FxHashMap::default(),
             blocked_readers: FxHashMap::default(),
+            next_uni_id: 0,
+            next_bi_id: 0,
             stream_opening: [Arc::new(Notify::new()), Arc::new(Notify::new())],
             incoming_uni_streams_reader: None,
             incoming_bi_streams_reader: None,
@@ -755,7 +783,7 @@ impl Drop for ConnectionRef {
         let conn = &mut *self.lock("drop");
         if let Some(x) = conn.ref_count.checked_sub(1) {
             conn.ref_count = x;
-            if x == 0 && !conn.inner.is_closed() {
+            if x == 0 && !conn.inner1.is_closed() {
                 // If the driver is alive, it's just it and us, so we'd better shut it down. If it's
                 // not, we can't do any harm. If there were any streams being opened, then either
                 // the connection will be closed for an unrelated reason or a fresh reference will
@@ -775,17 +803,22 @@ impl std::ops::Deref for ConnectionRef {
 
 pub struct ConnectionInner {
     pub(crate) inner: proto::Connection,
+    pub(crate) inner1: quiche::Connection,
     driver: Option<Waker>,
     handle: ConnectionHandle,
+    is_server: bool,
     on_handshake_data: Option<oneshot::Sender<()>>,
     on_connected: Option<oneshot::Sender<bool>>,
     connected: bool,
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     timer: Option<Pin<Box<dyn AsyncTimer>>>,
     timer_deadline: Option<Instant>,
     conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
     endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     pub(crate) blocked_writers: FxHashMap<StreamId, Waker>,
     pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
+    next_uni_id: u64,
+    next_bi_id: u64,
     stream_opening: [Arc<Notify>; 2],
     incoming_uni_streams_reader: Option<Waker>,
     incoming_bi_streams_reader: Option<Waker>,
@@ -807,6 +840,43 @@ impl ConnectionInner {
 
         let max_datagrams = self.udp_state.max_gso_segments();
 
+        loop {
+            let mut buf = vec![0; 4096];
+            let (write, send_info) = match self.inner1.send(&mut buf) {
+                Ok(v) => v,
+                Err(quiche::Error::Done) => {
+                    break;
+                }
+                Err(e) => {
+                    tracing::error!("send() failed: {:?}", e);
+                    break;
+                }
+            };
+            tracing::trace!("send: write={:?}", write);
+            let t = proto::Transmit {
+                destination: send_info.to,
+                ecn: None,
+                contents: buf[0..write].into(),
+                segment_size: None,
+                src_ip: None,
+            };
+
+            transmits += 1;
+            // If the endpoint driver is gone, noop.
+            let _ = self
+                .endpoint_events
+                .send((self.handle, EndpointEvent::Transmit(t)));
+
+            if transmits >= MAX_TRANSMIT_DATAGRAMS {
+                // TODO: What isn't ideal here yet is that if we don't poll all
+                // datagrams that could be sent we don't go into the `app_limited`
+                // state and CWND continues to grow until we get here the next time.
+                // See https://github.com/quinn-rs/quinn/issues/1126
+                return true;
+            }
+        }
+
+        /*
         while let Some(t) = self.inner.poll_transmit(now, max_datagrams) {
             transmits += match t.segment_size {
                 None => 1,
@@ -825,6 +895,7 @@ impl ConnectionInner {
                 return true;
             }
         }
+        */
 
         false
     }
@@ -835,6 +906,11 @@ impl ConnectionInner {
             let _ = self
                 .endpoint_events
                 .send((self.handle, EndpointEvent::Proto(event)));
+        }
+        if self.inner1.is_closed() {
+            let _ = self
+                .endpoint_events
+                .send((self.handle, EndpointEvent::Proto(proto::EndpointEvent::drained())));
         }
     }
 
@@ -851,6 +927,18 @@ impl ConnectionInner {
                 Poll::Ready(Some(ConnectionEvent::Close { reason, error_code })) => {
                     self.close(error_code, reason);
                 }
+                Poll::Ready(Some(ConnectionEvent::Datagram(mut datagram))) => {
+                    let recvinfo = quiche::RecvInfo { from: datagram.source, to: datagram.destination };
+                    match self.inner1.recv(&mut datagram.contents[..], recvinfo) {
+                        Ok(len) => {
+                            tracing::trace!("recv: len={}", len);
+                        }
+                        Err(e) => {
+                            tracing::error!("recv: error={:?}", e);
+                        }
+                    }
+                    
+                }
                 Poll::Ready(None) => {
                     return Err(ConnectionError::TransportError(proto::TransportError {
                         code: proto::TransportErrorCode::INTERNAL_ERROR,
@@ -866,6 +954,40 @@ impl ConnectionInner {
     }
 
     fn forward_app_events(&mut self) {
+        if !self.connected && self.inner1.is_established() {
+            self.connected = true;
+            if let Some(x) = self.on_connected.take() {
+                let _ = x.send(false);
+            }
+        }
+
+        if self.inner1.is_timed_out() {
+            self.terminate(ConnectionError::TimedOut);
+        }
+
+        if self.inner1.is_closed() {
+            if let Some(error) = self.inner1.local_error() {
+                tracing::trace!("error={:?}", error);
+            }
+            self.terminate(ConnectionError::LocallyClosed);
+        }
+
+        if (!self.blocked_readers.is_empty() && self.inner1.is_readable()) {
+            for id in self.inner1.readable() {
+                if let Some(reader) = self.blocked_readers.remove(&StreamId(id)) {
+                    reader.wake();
+                }
+            }
+        }
+
+        if (!self.blocked_writers.is_empty() && self.inner1.writable().next().is_some()) {
+            for id in self.inner1.writable() {
+                if let Some(writer) = self.blocked_writers.remove(&StreamId(id)) {
+                    writer.wake();
+                }
+            }
+        }
+
         while let Some(event) = self.inner.poll() {
             use proto::Event::*;
             match event {
@@ -934,6 +1056,7 @@ impl ConnectionInner {
     }
 
     fn drive_timer(&mut self, cx: &mut Context) -> bool {
+        /*
         // Check whether we need to (re)set the timer. If so, we must poll again to ensure the
         // timer is registered with the runtime (and check whether it's already
         // expired).
@@ -981,6 +1104,27 @@ impl ConnectionInner {
         self.inner.handle_timeout(Instant::now());
         self.timer_deadline = None;
         true
+        */
+        if let Some(sleep) = &self.sleep {
+            if sleep.as_ref().is_elapsed() {
+                self.inner1.on_timeout();                
+            }
+        }
+
+        let timeout = match self.inner1.timeout() {
+            Some(v) => v,
+            None => {
+                self.sleep = None;
+                return false;
+            }
+        };
+        self.sleep = Some(Box::pin(tokio::time::sleep(timeout)));
+        if Future::poll(self.sleep.as_mut().unwrap().as_mut(), cx).is_pending() {
+            return false;
+        }
+        self.sleep = None;
+        self.inner1.on_timeout();
+        true
     }
 
     /// Wake up a blocked `Driver` task to process I/O
@@ -1025,9 +1169,10 @@ impl ConnectionInner {
     }
 
     fn close(&mut self, error_code: VarInt, reason: Bytes) {
-        self.inner.close(Instant::now(), error_code, reason);
-        self.terminate(ConnectionError::LocallyClosed);
-        self.wake();
+        if self.inner1.close(true, error_code.into(), &reason[..]).is_ok() {
+            self.terminate(ConnectionError::LocallyClosed);
+            self.wake();
+        }
     }
 
     /// Close for a reason other than the application's explicit request

@@ -93,6 +93,7 @@ enum ConnectionEvent {
     },
     Proto(proto::ConnectionEvent),
     Ping,
+    Datagram(proto::UdpDatagram),
 }
 
 #[derive(Debug)]

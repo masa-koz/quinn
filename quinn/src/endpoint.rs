@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     future::Future,
     io,
     io::IoSliceMut,
@@ -7,7 +7,7 @@ use std::{
     net::{SocketAddr, SocketAddrV6},
     pin::Pin,
     str,
-    sync::{Arc, Mutex},
+    sync::Arc,
     task::{Context, Poll, Waker},
     time::Instant,
 };
@@ -22,9 +22,12 @@ use tokio::sync::{mpsc, Notify};
 use udp::{RecvMeta, UdpState, BATCH_SIZE};
 
 use crate::{
+    mutex::Mutex,
     connection::Connecting, poll_fn, work_limiter::WorkLimiter, ConnectionEvent, EndpointConfig,
     EndpointEvent, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND, SEND_TIME_BOUND,
 };
+
+use ring::rand::*;
 
 /// A QUIC endpoint.
 ///
@@ -50,7 +53,7 @@ impl Endpoint {
     /// IPv6 address on Windows will not by default be able to communicate with IPv4
     /// addresses. Portable applications should bind an address that matches the family they wish to
     /// communicate within.
-    #[cfg(feature = "ring")]
+    #[cfg(feature = "ring0")]
     pub fn client(addr: SocketAddr) -> io::Result<Self> {
         let socket = std::net::UdpSocket::bind(addr)?;
         let runtime = default_runtime()
@@ -70,7 +73,7 @@ impl Endpoint {
     /// IPv6 address on Windows will not by default be able to communicate with IPv4
     /// addresses. Portable applications should bind an address that matches the family they wish to
     /// communicate within.
-    #[cfg(feature = "ring")]
+    #[cfg(feature = "ring0")]
     pub fn server(config: ServerConfig, addr: SocketAddr) -> io::Result<(Self, Incoming)> {
         let socket = std::net::UdpSocket::bind(addr)?;
         let runtime = default_runtime()
@@ -170,7 +173,7 @@ impl Endpoint {
         addr: SocketAddr,
         server_name: &str,
     ) -> Result<Connecting, ConnectError> {
-        let mut endpoint = self.inner.lock().unwrap();
+        let mut endpoint = self.inner.lock("connect_with");
         if endpoint.driver_lost {
             return Err(ConnectError::EndpointStopping);
         }
@@ -182,11 +185,49 @@ impl Endpoint {
         } else {
             addr
         };
+        endpoint.socket.connect(addr);
+
+        let mut config0 = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+        config0.set_application_protos(&[b"hq-29"]).unwrap();
+        config0.verify_peer(false);
+        config0.set_max_idle_timeout(10000);
+        config0.set_max_recv_udp_payload_size(1350);
+        config0.set_max_send_udp_payload_size(1350);
+        config0.set_initial_max_data(10_000_000);
+        config0.set_initial_max_stream_data_bidi_local(1_000_000);
+        config0.set_initial_max_stream_data_bidi_remote(1_000_000);
+        config0.set_initial_max_stream_data_uni(1_000_000);
+        config0.set_initial_max_streams_bidi(100);
+        config0.set_initial_max_streams_uni(100);
+        config0.set_disable_active_migration(true);
+        config0.enable_early_data();
+        config0.enable_dgram(true, 1000, 1000);
+
+        let mut scid = [0; quiche::MAX_CONN_ID_LEN];
+        SystemRandom::new().fill(&mut scid[..]).unwrap();
+        let scid = quiche::ConnectionId::from_ref(&scid).into_owned();
+
+        let local_addr = endpoint.socket.local_addr().unwrap();
+
+        let mut conn1 = quiche::connect(
+            Some(server_name),
+            &scid,
+            local_addr,
+            addr,
+            &mut config0,
+        )
+        .unwrap();
+        let ch = ConnectionHandle(endpoint.next_connection_id);
+        endpoint.next_connection_id += 1;
+
         let (ch, conn) = endpoint.inner.connect(config, addr, server_name)?;
+
+        endpoint.connection_ids.insert(scid, ch);
+
         let udp_state = endpoint.udp_state.clone();
         Ok(endpoint
             .connections
-            .insert(ch, conn, udp_state, self.runtime.clone()))
+            .insert(ch, conn, conn1, false, udp_state, self.runtime.clone()))
     }
 
     /// Switch to a new UDP socket
@@ -198,7 +239,7 @@ impl Endpoint {
     pub fn rebind(&self, socket: std::net::UdpSocket) -> io::Result<()> {
         let addr = socket.local_addr()?;
         let socket = self.runtime.wrap_udp_socket(socket)?;
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = self.inner.lock("rebind");
         inner.socket = socket;
         inner.ipv6 = addr.is_ipv6();
 
@@ -216,15 +257,14 @@ impl Endpoint {
     /// Useful for e.g. refreshing TLS certificates without disrupting existing connections.
     pub fn set_server_config(&self, server_config: Option<ServerConfig>) {
         self.inner
-            .lock()
-            .unwrap()
+            .lock("set_server_config")
             .inner
             .set_server_config(server_config.map(Arc::new))
     }
 
     /// Get the local `SocketAddr` the underlying socket is bound to
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.inner.lock().unwrap().socket.local_addr()
+        self.inner.lock("local_addr").socket.local_addr()
     }
 
     /// Close all of this endpoint's connections immediately and cease accepting new connections.
@@ -234,7 +274,7 @@ impl Endpoint {
     /// [`Connection::close()`]: crate::Connection::close
     pub fn close(&self, error_code: VarInt, reason: &[u8]) {
         let reason = Bytes::copy_from_slice(reason);
-        let mut endpoint = self.inner.lock().unwrap();
+        let mut endpoint = self.inner.lock("close");
         endpoint.connections.close = Some((error_code, reason.clone()));
         for sender in endpoint.connections.senders.values() {
             // Ignoring errors from dropped connections
@@ -264,7 +304,7 @@ impl Endpoint {
         loop {
             let idle;
             {
-                let endpoint = &mut *self.inner.lock().unwrap();
+                let endpoint = &mut *self.inner.lock("wait_idle");
                 if endpoint.connections.is_empty() {
                     break;
                 }
@@ -300,7 +340,7 @@ impl Future for EndpointDriver {
 
     #[allow(unused_mut)] // MSRV
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let mut endpoint = self.0.lock().unwrap();
+        let mut endpoint = self.0.lock("EndpointDriver::poll");
         if endpoint.driver.is_none() {
             endpoint.driver = Some(cx.waker().clone());
         }
@@ -334,7 +374,7 @@ impl Future for EndpointDriver {
 
 impl Drop for EndpointDriver {
     fn drop(&mut self) {
-        let mut endpoint = self.0.lock().unwrap();
+        let mut endpoint = self.0.lock("EndpointDriver::drop");
         endpoint.driver_lost = true;
         if let Some(task) = endpoint.incoming_reader.take() {
             task.wake();
@@ -345,16 +385,21 @@ impl Drop for EndpointDriver {
     }
 }
 
+type ConnectionIdMap = HashMap<quiche::ConnectionId<'static>, ConnectionHandle>;
+
 #[derive(Debug)]
 pub(crate) struct EndpointInner {
     socket: Box<dyn AsyncUdpSocket>,
     udp_state: Arc<UdpState>,
     inner: proto::Endpoint,
+    incoming_dgram: VecDeque<proto::UdpDatagram>,
     outgoing: VecDeque<proto::Transmit>,
     incoming: VecDeque<Connecting>,
     incoming_reader: Option<Waker>,
     driver: Option<Waker>,
     ipv6: bool,
+    next_connection_id: usize,
+    connection_ids: ConnectionIdMap,
     connections: ConnectionSet,
     events: mpsc::UnboundedReceiver<(ConnectionHandle, EndpointEvent)>,
     /// Number of live handles that can be used to initiate or handle I/O; excludes the driver
@@ -386,35 +431,97 @@ impl EndpointInner {
             match self.socket.poll_recv(cx, &mut iovs, &mut metas) {
                 Poll::Ready(Ok(msgs)) => {
                     self.recv_limiter.record_work(msgs);
-                    for (meta, buf) in metas.iter().zip(iovs.iter()).take(msgs) {
-                        let mut data: BytesMut = buf[0..meta.len].into();
-                        while !data.is_empty() {
-                            let buf = data.split_to(meta.stride.min(data.len()));
-                            match self
-                                .inner
-                                .handle(now, meta.addr, meta.dst_ip, meta.ecn, buf)
-                            {
-                                Some((handle, DatagramEvent::NewConnection(conn))) => {
-                                    let conn = self.connections.insert(
-                                        handle,
-                                        conn,
-                                        self.udp_state.clone(),
-                                        self.runtime.clone(),
-                                    );
-                                    self.incoming.push_back(conn);
-                                }
-                                Some((handle, DatagramEvent::ConnectionEvent(event))) => {
-                                    // Ignoring errors from dropped connections that haven't yet been cleaned up
-                                    let _ = self
-                                        .connections
-                                        .senders
-                                        .get_mut(&handle)
-                                        .unwrap()
-                                        .send(ConnectionEvent::Proto(event));
-                                }
-                                None => {}
+                    for (meta, buf) in metas.iter().zip(iovs.iter_mut()).take(msgs) {
+                        let hdr = quiche::Header::from_slice(&mut buf[0..meta.len], quiche::MAX_CONN_ID_LEN).unwrap();
+
+                        let bind_addr = self.socket.local_addr().unwrap();
+
+                        let mut buf1 = vec![0; meta.len];
+                        buf1.clone_from_slice(&buf[0..meta.len]);
+                        let datagram = proto::UdpDatagram {
+                            destination: SocketAddr::new(meta.dst_ip.unwrap(), bind_addr.port()),
+                            source: meta.addr,
+                            ecn: meta.ecn,
+                            contents: buf1,
+                            segment_size: None,
+                        };
+
+                        let ch = if self.connection_ids.contains_key(&hdr.dcid) {
+                            *self.connection_ids.get(&hdr.dcid).unwrap()
+                        } else {
+                            if hdr.ty != quiche::Type::Initial {
+                                tracing::error!("Packet is not Initial");
+                                continue;
                             }
+                            let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+                            config.load_cert_chain_from_pem_file("src/cert.crt").unwrap();
+                            config.load_priv_key_from_pem_file("src/cert.key").unwrap();
+                            config.set_application_protos(&[b"hq-29"]).unwrap();
+                            config.set_max_idle_timeout(10000);
+                            config.set_max_recv_udp_payload_size(1350);
+                            config.set_max_send_udp_payload_size(1350);
+                            config.set_initial_max_data(10_000_000);
+                            config.set_initial_max_stream_data_bidi_local(1_000_000);
+                            config.set_initial_max_stream_data_bidi_remote(1_000_000);
+                            config.set_initial_max_stream_data_uni(1_000_000);
+                            config.set_initial_max_streams_bidi(100);
+                            config.set_initial_max_streams_uni(100);
+                            config.set_disable_active_migration(true);
+                            config.enable_early_data();
+                            config.enable_dgram(true, 1000, 1000);
+
+                            let mut new_dcid = [0; quiche::MAX_CONN_ID_LEN];
+                            SystemRandom::new().fill(&mut new_dcid[..]).unwrap();
+                            let new_dcid = quiche::ConnectionId::from_vec(new_dcid.into());
+
+                            let ch = ConnectionHandle(self.next_connection_id);
+                            self.next_connection_id += 1;
+
+                            let mut conn1 = quiche::accept(
+                                &new_dcid,
+                                None,
+                                SocketAddr::new(meta.dst_ip.unwrap(), bind_addr.port()),
+                                meta.addr,
+                                &mut config,
+                            )
+                            .unwrap();
+                            
+                            let mut data: BytesMut = buf[0..meta.len].into();
+                            let buf = data.split_to(meta.stride.min(data.len()));
+                            if let Some((ch, DatagramEvent::NewConnection(conn))) = self.inner.handle(now, meta.addr, meta.dst_ip, meta.ecn, buf) {
+                                let conn = self.connections.insert(
+                                    ch,
+                                    conn,
+                                    conn1,
+                                    true,
+                                    self.udp_state.clone(),
+                                    self.runtime.clone(),
+                                );
+                                tracing::trace!("conn={:?}", conn);
+                                self.incoming.push_back(conn);
+
+                                self.connection_ids.insert(new_dcid, ch);
+                            } else {
+                                self.incoming_dgram.push_back(datagram);
+                                continue;
+                            }
+                            ch
+                        };
+
+                        while let Some(d) = self.incoming_dgram.pop_front() {
+                            let _ = self
+                            .connections
+                            .senders
+                            .get_mut(&ch)
+                            .unwrap()
+                            .send(ConnectionEvent::Datagram(d));
                         }
+                        let _ = self
+                        .connections
+                        .senders
+                        .get_mut(&ch)
+                        .unwrap()
+                        .send(ConnectionEvent::Datagram(datagram));
                     }
                 }
                 Poll::Pending => {
@@ -494,6 +601,7 @@ impl EndpointInner {
                                 self.idle.notify_waiters();
                             }
                         }
+                        /*
                         if let Some(event) = self.inner.handle_event(ch, e) {
                             // Ignoring errors from dropped connections that haven't yet been cleaned up
                             let _ = self
@@ -502,9 +610,11 @@ impl EndpointInner {
                                 .get_mut(&ch)
                                 .unwrap()
                                 .send(ConnectionEvent::Proto(event));
-                        }
+                        }*/
                     }
-                    Transmit(t) => self.outgoing.push_back(t),
+                    Transmit(t) => {
+                        self.outgoing.push_back(t);
+                    },
                 },
                 Poll::Ready(None) => unreachable!("EndpointInner owns one sender"),
                 Poll::Pending => {
@@ -532,6 +642,8 @@ impl ConnectionSet {
         &mut self,
         handle: ConnectionHandle,
         conn: proto::Connection,
+        conn1: quiche::Connection,
+        is_server: bool,
         udp_state: Arc<UdpState>,
         runtime: Arc<Box<dyn Runtime>>,
     ) -> Connecting {
@@ -544,7 +656,7 @@ impl ConnectionSet {
             .unwrap();
         }
         self.senders.insert(handle, send);
-        Connecting::new(handle, conn, self.sender.clone(), recv, udp_state, runtime)
+        Connecting::new(handle, conn, conn1, is_server, self.sender.clone(), recv, udp_state, runtime)
     }
 
     fn is_empty(&self) -> bool {
@@ -576,7 +688,7 @@ impl Incoming {
     }
 
     fn poll(&mut self, cx: &mut Context) -> Poll<Option<Connecting>> {
-        let endpoint = &mut *self.0.lock().unwrap();
+        let endpoint = &mut *self.0.lock("Incoming::poll");
         if endpoint.driver_lost {
             Poll::Ready(None)
         } else if let Some(conn) = endpoint.incoming.pop_front() {
@@ -602,7 +714,7 @@ impl futures_core::Stream for Incoming {
 
 impl Drop for Incoming {
     fn drop(&mut self) {
-        let endpoint = &mut *self.0.lock().unwrap();
+        let endpoint = &mut *self.0.lock("Incoming::drop");
         endpoint.inner.reject_new_connections();
         endpoint.incoming_reader = None;
     }
@@ -632,10 +744,13 @@ impl EndpointRef {
             inner,
             ipv6,
             events,
+            incoming_dgram: VecDeque::new(),
             outgoing: VecDeque::new(),
             incoming: VecDeque::new(),
             incoming_reader: None,
             driver: None,
+            next_connection_id: 0,
+            connection_ids: ConnectionIdMap::new(),
             connections: ConnectionSet {
                 senders: FxHashMap::default(),
                 sender,
@@ -654,14 +769,14 @@ impl EndpointRef {
 
 impl Clone for EndpointRef {
     fn clone(&self) -> Self {
-        self.0.lock().unwrap().ref_count += 1;
+        self.0.lock("EndpointRef::clone").ref_count += 1;
         Self(self.0.clone())
     }
 }
 
 impl Drop for EndpointRef {
     fn drop(&mut self) {
-        let endpoint = &mut *self.0.lock().unwrap();
+        let endpoint = &mut *self.0.lock("EndpointRef::drop");
         if let Some(x) = endpoint.ref_count.checked_sub(1) {
             endpoint.ref_count = x;
             if x == 0 {

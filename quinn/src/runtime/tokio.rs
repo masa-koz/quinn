@@ -88,4 +88,18 @@ impl AsyncUdpSocket for UdpSocket {
     fn local_addr(&self) -> io::Result<std::net::SocketAddr> {
         self.io.local_addr()
     }
+
+    fn connect(&mut self, addr: std::net::SocketAddr) -> io::Result<()> {
+        let new_std_sock = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let new_sock = tokio::net::UdpSocket::from_std(new_std_sock).unwrap();
+        let sock = std::mem::replace(&mut self.io, new_sock);
+        let std_sock = sock.into_std().unwrap();
+        std_sock.connect(addr).unwrap();
+        let sock = tokio::net::UdpSocket::from_std(std_sock).unwrap();
+        let _ = std::mem::replace(&mut self.io, sock);
+        Ok(())
+    }
+
+
+
 }

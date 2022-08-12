@@ -9,6 +9,7 @@ use bytes::Bytes;
 use proto::{ConnectionError, FinishError, StreamId, Written};
 use thiserror::Error;
 use tokio::sync::oneshot;
+use tracing::trace;
 
 use crate::{
     connection::{ConnectionRef, UnknownStream},
@@ -80,6 +81,36 @@ impl SendStream {
         .await
     }
 
+    fn execute_poll1(&mut self, cx: &mut Context, data: &[u8]) -> Poll<Result<usize, WriteError>>
+    {
+        let mut conn = self.conn.lock("SendStream::poll_write");
+        if self.is_0rtt {
+            conn.check_0rtt()
+                .map_err(|()| WriteError::ZeroRttRejected)?;
+        }
+        if let Some(ref x) = conn.error {
+            return Poll::Ready(Err(WriteError::ConnectionLost(x.clone())));
+        }
+
+        let result = match conn.inner1.stream_send(self.stream.0, data, false) {
+            Ok(result) => result,
+            Err(quiche::Error::Done) => {
+                conn.blocked_writers.insert(self.stream, cx.waker().clone());
+                return Poll::Pending;
+            }
+            Err(quiche::Error::InvalidStreamState(_)) => {
+                return Poll::Ready(Err(WriteError::UnknownStream));
+            }
+            Err(e) => {
+                tracing::error!("stream_send: error={:?}", e);
+                return Poll::Ready(Err(WriteError::Stopped(0u8.into())));
+            }
+        };
+
+        conn.wake();
+        Poll::Ready(Ok(result))
+    }
+
     fn execute_poll<F, R>(&mut self, cx: &mut Context, write_fn: F) -> Poll<Result<R, WriteError>>
     where
         F: FnOnce(&mut proto::SendStream) -> Result<R, proto::WriteError>,
@@ -117,7 +148,15 @@ impl SendStream {
     /// No new data may be written after calling this method. Completes when the peer has
     /// acknowledged all sent data, retransmitting data as needed.
     pub async fn finish(&mut self) -> Result<(), WriteError> {
-        Finish { stream: self }.await
+        let mut conn = self.conn.lock("finish");
+        match conn.inner1.stream_send(self.stream.0, &Vec::new(), true) {
+            Ok(result) => return(Ok(())),
+            Err(quiche::Error::InvalidStreamState(_)) => return Err(WriteError::UnknownStream),
+            Err(e) => {
+                tracing::error!("stream_send: error={:?}", e);
+                return Err(WriteError::Stopped(0u8.into()));
+            }
+        }
     }
 
     #[doc(hidden)]
@@ -246,7 +285,7 @@ impl tokio::io::AsyncWrite for SendStream {
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        SendStream::execute_poll(self.get_mut(), cx, |stream| stream.write(buf)).map_err(Into::into)
+        SendStream::execute_poll1(self.get_mut(), cx, buf).map_err(Into::into)
     }
 
     fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
@@ -343,7 +382,7 @@ impl<'a> Future for WriteAll<'a> {
                 return Poll::Ready(Ok(()));
             }
             let buf = this.buf;
-            let n = ready!(this.stream.execute_poll(cx, |s| s.write(buf)))?;
+            let n = ready!(this.stream.execute_poll1(cx, buf))?;
             this.buf = &this.buf[n..];
         }
     }

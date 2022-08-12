@@ -283,6 +283,20 @@ pub struct Transmit {
     pub src_ip: Option<IpAddr>,
 }
 
+#[derive(Debug)]
+pub struct UdpDatagram {
+    /// The socket this datagram should be sent to
+    pub destination: SocketAddr,
+    pub source: SocketAddr,
+    /// Explicit congestion notification bits to set on the packet
+    pub ecn: Option<EcnCodepoint>,
+    /// Contents of the datagram
+    pub contents: Vec<u8>,
+    /// The segment size if this transmission contains multiple datagrams.
+    /// This is `None` if the transmit only contains a single datagram
+    pub segment_size: Option<usize>,
+}
+
 //
 // Useful internal constants
 //

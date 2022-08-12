@@ -50,6 +50,8 @@ pub trait AsyncUdpSocket: Send + Debug + 'static {
 
     /// Look up the local IP address and port used by this socket
     fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    fn connect(&mut self, addr: SocketAddr) -> io::Result<()>;
 }
 
 /// Automatically select an appropriate runtime from those enabled at compile time

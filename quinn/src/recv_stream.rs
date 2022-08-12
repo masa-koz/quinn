@@ -72,28 +72,34 @@ impl RecvStream {
         cx: &mut Context,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<(), ReadError>> {
-        if buf.remaining() == 0 {
+        if buf.remaining() == 0 || self.all_data_read {
             return Poll::Ready(Ok(()));
         }
 
-        self.poll_read_generic(cx, true, |chunks| {
-            let mut read = false;
-            loop {
-                if buf.remaining() == 0 {
-                    // We know `read` is `true` because `buf.remaining()` was not 0 before
-                    return ReadStatus::Readable(());
-                }
+        let b = buf.initialize_unfilled();
 
-                match chunks.next(buf.remaining()) {
-                    Ok(Some(chunk)) => {
-                        buf.put_slice(&chunk.bytes);
-                        read = true;
-                    }
-                    res => return (if read { Some(()) } else { None }, res.err()).into(),
+        let mut conn = self.conn.lock("RecvStream::poll_read");
+        match conn.inner1.stream_recv(self.stream.0, b) {
+            Ok((n, fin)) => {
+                buf.advance(n);
+                if fin {
+                    self.all_data_read = true;
                 }
+                return Poll::Ready(Ok(()));
             }
-        })
-        .map(|res| res.map(|_| ()))
+            Err(quiche::Error::Done) => {
+                conn.blocked_readers.insert(self.stream, cx.waker().clone());
+                return Poll::Pending;
+            }
+            Err(quiche::Error::InvalidStreamState(id)) => {
+                return Poll::Ready(Err(ReadError::UnknownStream))
+            }
+            Err(e) => {
+                tracing::error!("stream_recv: error={:?}", e);
+                return Poll::Ready(Err(ReadError::UnknownStream));
+            }
+
+        }
     }
 
     /// Read the next segment of data
