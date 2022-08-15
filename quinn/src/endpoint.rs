@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, Notify};
 use udp::{RecvMeta, UdpState, BATCH_SIZE};
 
 use crate::{
-    connection::Connecting, mutex::Mutex, poll_fn, work_limiter::WorkLimiter, ConnectionEvent,
+    connection::Connecting, connection::ConnectionRef, mutex::Mutex, poll_fn, work_limiter::WorkLimiter, ConnectionEvent,
     EndpointConfig, EndpointEvent, VarInt, IO_LOOP_BOUND, RECV_TIME_BOUND, SEND_TIME_BOUND,
 };
 
@@ -427,16 +427,6 @@ impl EndpointInner {
 
                         let bind_addr = self.socket.local_addr().unwrap();
 
-                        let mut buf1 = vec![0; meta.len];
-                        buf1.clone_from_slice(&buf[0..meta.len]);
-                        let datagram = proto::UdpDatagram {
-                            destination: SocketAddr::new(meta.dst_ip.unwrap(), bind_addr.port()),
-                            source: meta.addr,
-                            ecn: meta.ecn,
-                            contents: buf1,
-                            segment_size: None,
-                        };
-
                         let ch = if self.connection_ids.contains_key(&hdr.dcid) {
                             *self.connection_ids.get(&hdr.dcid).unwrap()
                         } else {
@@ -486,11 +476,36 @@ impl EndpointInner {
                                 self.udp_state.clone(),
                                 self.runtime.clone(),
                             );
-                            tracing::trace!("conn={:?}", conn);
                             self.incoming.push_back(conn);
 
                             self.connection_ids.insert(new_dcid, ch);
                             ch
+                        };
+
+                        let mut conn = self.connections.connections.get(&ch).unwrap().lock("drive_recv");
+                        let recvinfo = quiche::RecvInfo {
+                            from: meta.addr,
+                            to: SocketAddr::new(meta.dst_ip.unwrap(), bind_addr.port()),
+                        };
+                        match conn.inner.recv(&mut buf[0..meta.len], recvinfo) {
+                            Ok(len) => {
+                                tracing::trace!("recv: len={}", len);
+                            }
+                            Err(e) => {
+                                tracing::error!("recv: error={:?}", e);
+                            }
+                        }
+                        conn.wake();
+                        drop(conn);
+                        /*
+                        let mut buf1 = vec![0; meta.len];
+                        buf1.clone_from_slice(&buf[0..meta.len]);
+                        let datagram = proto::UdpDatagram {
+                            destination: SocketAddr::new(meta.dst_ip.unwrap(), bind_addr.port()),
+                            source: meta.addr,
+                            ecn: meta.ecn,
+                            contents: buf1,
+                            segment_size: None,
                         };
 
                         let _ = self
@@ -499,6 +514,7 @@ impl EndpointInner {
                             .get_mut(&ch)
                             .unwrap()
                             .send(ConnectionEvent::Datagram(datagram));
+                        */
                     }
                 }
                 Poll::Pending => {
@@ -567,6 +583,7 @@ impl EndpointInner {
                     Proto(e) => {
                         if e.is_drained() {
                             self.connections.senders.remove(&ch);
+                            self.connections.connections.remove(&ch);
                             if self.connections.is_empty() {
                                 self.idle.notify_waiters();
                             }
@@ -601,6 +618,7 @@ impl EndpointInner {
 struct ConnectionSet {
     /// Senders for communicating with the endpoint's connections
     senders: FxHashMap<ConnectionHandle, mpsc::UnboundedSender<ConnectionEvent>>,
+    connections: FxHashMap<ConnectionHandle, ConnectionRef>,
     /// Stored to give out clones to new ConnectionInners
     sender: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     /// Set if the endpoint has been manually closed
@@ -625,7 +643,7 @@ impl ConnectionSet {
             .unwrap();
         }
         self.senders.insert(handle, send);
-        Connecting::new(
+        let (connecting, conn_ref) = Connecting::new(
             handle,
             conn,
             is_server,
@@ -633,7 +651,9 @@ impl ConnectionSet {
             recv,
             udp_state,
             runtime,
-        )
+        );
+        self.connections.insert(handle, conn_ref);
+        connecting
     }
 
     fn is_empty(&self) -> bool {
@@ -726,6 +746,7 @@ impl EndpointRef {
             connection_ids: ConnectionIdMap::new(),
             connections: ConnectionSet {
                 senders: FxHashMap::default(),
+                connections: FxHashMap::default(),
                 sender,
                 close: None,
             },

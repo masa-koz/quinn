@@ -46,7 +46,7 @@ impl Connecting {
         conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
         udp_state: Arc<UdpState>,
         runtime: Arc<Box<dyn Runtime>>,
-    ) -> Connecting {
+    ) -> (Connecting, ConnectionRef) {
         let (on_handshake_data_send, on_handshake_data_recv) = oneshot::channel();
         let (on_connected_send, on_connected_recv) = oneshot::channel();
         let conn = ConnectionRef::new(
@@ -63,11 +63,14 @@ impl Connecting {
 
         runtime.spawn(Box::pin(ConnectionDriver(conn.clone())));
 
-        Connecting {
-            conn: Some(conn),
-            connected: on_connected_recv,
-            handshake_data_ready: Some(on_handshake_data_recv),
-        }
+        (
+            Connecting {
+                conn: Some(conn.clone()),
+                connected: on_connected_recv,
+                handshake_data_ready: Some(on_handshake_data_recv),
+            },
+            conn,
+        )
     }
 
     /*
@@ -283,7 +286,7 @@ impl Future for ConnectionDriver {
 
     #[allow(unused_mut)] // MSRV
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let conn = &mut *self.0.lock("poll");
+        let conn = &mut *self.0.lock("ConnectionDriver::poll");
 
         let span = debug_span!("drive", id = conn.handle.0);
         let _guard = span.enter();
@@ -712,9 +715,7 @@ impl IncomingBiStreams {
         &mut self,
         cx: &mut Context,
     ) -> Poll<Option<Result<(SendStream, RecvStream), ConnectionError>>> {
-        tracing::trace!("poll");
         let mut conn = self.0.lock("IncomingBiStreams::poll");
-        tracing::trace!("readable={:?}", conn.inner.readable().collect::<Vec<u64>>());
         if let Some(id) = conn
             .inner
             .readable()
