@@ -89,18 +89,21 @@ impl RecvStream {
                 if fin {
                     self.all_data_read = true;
                 }
-                return Poll::Ready(Ok(()));
+                Poll::Ready(Ok(()))
             }
             Err(quiche::Error::Done) => {
                 conn.blocked_readers.insert(self.stream, cx.waker().clone());
-                return Poll::Pending;
+                Poll::Pending
             }
             Err(quiche::Error::InvalidStreamState(id)) => {
-                return Poll::Ready(Err(ReadError::UnknownStream))
+                Poll::Ready(Err(ReadError::UnknownStream))
+            }
+            Err(quiche::Error::StreamReset(error_code)) => {
+                Poll::Ready(Err(ReadError::Reset((error_code))))
             }
             Err(e) => {
                 tracing::error!("stream_recv: error={:?}", e);
-                return Poll::Ready(Err(ReadError::UnknownStream));
+                Poll::Ready(Err(ReadError::UnknownStream))
             }
         }
     }
@@ -422,6 +425,18 @@ impl tokio::io::AsyncRead for RecvStream {
 impl Drop for RecvStream {
     fn drop(&mut self) {
         let mut conn = self.conn.lock("RecvStream::drop");
+        if conn
+            .streams
+            .get_mut(&self.stream)
+            .map(|count| {
+                *count -= 1;
+                *count
+            })
+            .unwrap()
+            == 0
+        {
+            conn.streams.remove(&self.stream);
+        }
         /*
         if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
@@ -429,7 +444,9 @@ impl Drop for RecvStream {
         */
         if !self.all_data_read {
             // Ignore UnknownStream errors
-            let _ = conn.inner.stream_shutdown(self.stream.0, quiche::Shutdown::Read, 0);
+            let _ = conn
+                .inner
+                .stream_shutdown(self.stream.0, quiche::Shutdown::Read, 0);
             conn.wake();
         }
     }
@@ -442,7 +459,7 @@ pub enum ReadError {
     ///
     /// Carries an application-defined error code.
     #[error("stream reset by peer: error {0}")]
-    Reset(VarInt),
+    Reset(u64),
     /// The connection was lost
     #[error("connection lost")]
     ConnectionLost(#[from] ConnectionError),

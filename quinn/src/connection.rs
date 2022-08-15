@@ -336,6 +336,11 @@ impl Connection {
     /// actually used.
     pub async fn open_uni(&self) -> Result<SendStream, ConnectionError> {
         let (id, is_0rtt) = self.open(Dir::Uni).await?;
+        {
+            let mut conn = self.0.lock("open_bi");
+            conn.streams.insert(id.clone(), 1);
+        }
+
         Ok(SendStream::new(self.0.clone(), id, is_0rtt))
     }
 
@@ -346,6 +351,10 @@ impl Connection {
     /// actually used.
     pub async fn open_bi(&self) -> Result<(SendStream, RecvStream), ConnectionError> {
         let (id, is_0rtt) = self.open(Dir::Bi).await?;
+        {
+            let mut conn = self.0.lock("open_bi");
+            conn.streams.insert(id.clone(), 2);
+        }
         Ok((
             SendStream::new(self.0.clone(), id, is_0rtt),
             RecvStream::new(self.0.clone(), id, is_0rtt),
@@ -652,9 +661,14 @@ impl IncomingUniStreams {
         if let Some(id) = conn
             .inner
             .readable()
-            .filter(|id| (*id & 0x2) == 0x02 && (conn.is_server && (*id & 0x1) == 0))
+            .filter(|id| {
+                !conn.streams.contains_key(&StreamId(*id))
+                    && (*id & 0x2) == 0x02
+                    && (conn.is_server && (*id & 0x1) == 0)
+            })
             .next()
         {
+            conn.streams.insert(StreamId(id), 1);
             conn.wake(); // To send additional stream ID credit
             mem::drop(conn); // Release the lock so clone can take it
             Poll::Ready(Some(Ok(RecvStream::new(
@@ -704,10 +718,15 @@ impl IncomingBiStreams {
         if let Some(id) = conn
             .inner
             .readable()
-            .filter(|id| (*id & 0x2) == 0 && (conn.is_server && (*id & 0x1) != 0x1))
+            .filter(|id| {
+                !conn.streams.contains_key(&StreamId(*id))
+                    && (*id & 0x2) == 0
+                    && (conn.is_server && (*id & 0x1) != 0x1)
+            })
             .next()
         {
             let is_0rtt = false;
+            conn.streams.insert(StreamId(id), 2);
             conn.wake(); // To send additional stream ID credit
             mem::drop(conn); // Release the lock so clone can take it
             Poll::Ready(Some(Ok((
@@ -802,6 +821,7 @@ impl ConnectionRef {
             blocked_readers: FxHashMap::default(),
             next_uni_id: 0,
             next_bi_id: 0,
+            streams: FxHashMap::default(),
             stream_opening: [Arc::new(Notify::new()), Arc::new(Notify::new())],
             incoming_uni_streams_reader: None,
             incoming_bi_streams_reader: None,
@@ -865,6 +885,7 @@ pub struct ConnectionInner {
     endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
     pub(crate) blocked_writers: FxHashMap<StreamId, Waker>,
     pub(crate) blocked_readers: FxHashMap<StreamId, Waker>,
+    pub(crate) streams: FxHashMap<StreamId, u8>,
     next_uni_id: u64,
     next_bi_id: u64,
     stream_opening: [Arc<Notify>; 2],
@@ -1019,7 +1040,8 @@ impl ConnectionInner {
 
         if self.incoming_bi_streams_reader.is_some() {
             tracing::trace!("incoming_bi_streams_reader");
-            if self.inner
+            if self
+                .inner
                 .readable()
                 .filter(|id| (*id & 0x2) == 0 && (self.is_server && (*id & 0x1) == 0))
                 .next()
@@ -1042,6 +1064,19 @@ impl ConnectionInner {
             for id in self.inner.writable() {
                 if let Some(writer) = self.blocked_writers.remove(&StreamId(id)) {
                     writer.wake();
+                }
+            }
+        }
+        if !self.stopped.is_empty() {
+            let mut stopped = Vec::new();
+            for (id, _) in self.stopped.iter() {
+                if self.inner.stream_capacity(id.0).is_err() {
+                    stopped.push(*id);
+                }
+            }
+            for id in stopped {
+                if let Some(waker) = self.stopped.remove(&id) {
+                    waker.wake();
                 }
             }
         }

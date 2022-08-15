@@ -91,8 +91,7 @@ impl SendStream {
     }
     */
 
-    fn execute_poll1(&mut self, cx: &mut Context, data: &[u8]) -> Poll<Result<usize, WriteError>>
-    {
+    fn execute_poll1(&mut self, cx: &mut Context, data: &[u8]) -> Poll<Result<usize, WriteError>> {
         let mut conn = self.conn.lock("SendStream::poll_write");
         /*
         if self.is_0rtt {
@@ -107,15 +106,19 @@ impl SendStream {
         let result = match conn.inner.stream_send(self.stream.0, data, false) {
             Ok(result) => result,
             Err(quiche::Error::Done) => {
-                conn.blocked_writers.insert(self.stream, cx.waker().clone());
-                return Poll::Pending;
+                if conn.inner.stream_capacity(self.stream.0).is_ok() {
+                    conn.blocked_writers.insert(self.stream, cx.waker().clone());
+                    return Poll::Pending;
+                } else {
+                    return Poll::Ready(Err(WriteError::Stopped(0u8.into())));
+                }
             }
-            Err(quiche::Error::InvalidStreamState(_)) => {
-                return Poll::Ready(Err(WriteError::UnknownStream));
+            Err(quiche::Error::StreamStopped(error_code)) => {
+                return Poll::Ready(Err(WriteError::Stopped(error_code)))
             }
             Err(e) => {
                 tracing::error!("stream_send: error={:?}", e);
-                return Poll::Ready(Err(WriteError::Stopped(0u8.into())));
+                return Poll::Ready(Err(WriteError::UnknownStream));
             }
         };
 
@@ -215,7 +218,6 @@ impl SendStream {
     }
     */
 
-    /*
     /// Close the send stream immediately.
     ///
     /// No new data can be written after calling this method. Locally buffered data is dropped, and
@@ -223,14 +225,22 @@ impl SendStream {
     /// already been made to finish the stream, the peer may still receive all written data.
     pub fn reset(&mut self, error_code: VarInt) -> Result<(), UnknownStream> {
         let mut conn = self.conn.lock("SendStream::reset");
+        /*
         if self.is_0rtt && conn.check_0rtt().is_err() {
             return Ok(());
         }
-        conn.inner.send_stream(self.stream).reset(error_code)?;
-        conn.wake();
-        Ok(())
+        */
+        if conn
+            .inner
+            .stream_shutdown(self.stream.0, quiche::Shutdown::Write, error_code.into())
+            .is_ok()
+        {
+            conn.wake();
+            Ok(())
+        } else {
+            Err(UnknownStream { _private: () })
+        }
     }
-    */
 
     /*
     /// Set the priority of the send stream
@@ -255,33 +265,35 @@ impl SendStream {
     }
     */
 
-    /*
     /// Completes if/when the peer stops the stream, yielding the error code
-    pub async fn stopped(&mut self) -> Result<VarInt, StoppedError> {
+    pub async fn stopped(&mut self) -> Result<u64, StoppedError> {
         Stopped { stream: self }.await
     }
-    */
 
-    /*
     #[doc(hidden)]
-    pub fn poll_stopped(&mut self, cx: &mut Context) -> Poll<Result<VarInt, StoppedError>> {
+    pub fn poll_stopped(&mut self, cx: &mut Context) -> Poll<Result<u64, StoppedError>> {
         let mut conn = self.conn.lock("SendStream::poll_stopped");
 
+        tracing::trace!("poll_stopped");
+        /*
         if self.is_0rtt {
             conn.check_0rtt()
                 .map_err(|()| StoppedError::ZeroRttRejected)?;
         }
+        */
 
-        match conn.inner.send_stream(self.stream).stopped() {
-            Err(_) => Poll::Ready(Err(StoppedError::UnknownStream)),
-            Ok(Some(error_code)) => Poll::Ready(Ok(error_code)),
-            Ok(None) => {
+        match conn.inner.stream_capacity(self.stream.0) {
+            Ok(_) => {
                 conn.stopped.insert(self.stream, cx.waker().clone());
                 Poll::Pending
             }
+            Err(quiche::Error::StreamStopped(error_code)) => Poll::Ready(Ok(error_code)),
+            Err(quiche::Error::InvalidStreamState(_)) => Poll::Ready(Ok(0)), // The stream is already collected.
+            Err(_) => {
+                Poll::Ready(Err(StoppedError::UnknownStream)) // XXX
+            }
         }
     }
-    */
 
     /// Get the identity of this stream
     pub fn id(&self) -> StreamId {
@@ -326,8 +338,20 @@ impl tokio::io::AsyncWrite for SendStream {
 
 impl Drop for SendStream {
     fn drop(&mut self) {
-        /*
         let mut conn = self.conn.lock("SendStream::drop");
+        if conn
+            .streams
+            .get_mut(&self.stream)
+            .map(|count| {
+                *count -= 1;
+                *count
+            })
+            .unwrap()
+            == 0
+        {
+            conn.streams.remove(&self.stream);
+        }
+        /*
         if conn.error.is_some() || (self.is_0rtt && conn.check_0rtt().is_err()) {
             return;
         }
@@ -361,7 +385,7 @@ impl Future for Finish<'_> {
         self.get_mut().stream.poll_finish(cx)
     }
 }
-
+*/
 /// Future produced by `SendStream::stopped`
 #[must_use = "futures/streams/sinks do nothing unless you `.await` or poll them"]
 struct Stopped<'a> {
@@ -369,13 +393,14 @@ struct Stopped<'a> {
 }
 
 impl Future for Stopped<'_> {
-    type Output = Result<VarInt, StoppedError>;
+    type Output = Result<u64, StoppedError>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
         self.get_mut().stream.poll_stopped(cx)
     }
 }
 
+/*
 /// Future produced by [`SendStream::write()`].
 ///
 /// [`SendStream::write()`]: crate::SendStream::write
@@ -492,7 +517,7 @@ pub enum WriteError {
     ///
     /// Carries an application-defined error code.
     #[error("sending stopped by peer: error {0}")]
-    Stopped(VarInt),
+    Stopped(u64),
     /// The connection was lost
     #[error("connection lost")]
     ConnectionLost(#[from] ConnectionError),
